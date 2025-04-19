@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { useAccount, useNetwork } from "@starknet-react/core";
 import { useDropzone } from "react-dropzone";
 import Papa from "papaparse";
@@ -15,64 +15,11 @@ import { useIsMounted } from "@/lib/hooks/useIsMounted";
 import DistributeSkeleton from "@/components/ui/distribute/DistributeSkeleton";
 import CartridgeWalletInfo from "@/components/ui/distribute/CartridgeWalletInfo";
 import { useCartridge } from "@/lib/hooks/useCartridge";
-
-interface Distribution {
-  address: string;
-  amount: string;
-}
-
-interface TokenOption {
-  symbol: string;
-  address: string;
-  decimals: number;
-}
-
-// Define contract addresses for different networks
-const TESTNET_CONTRACT_ADDRESS = "0x02495b0832001cde19e2bd3ec27beabe07b913000e155864a77b5e834ce60b6a";
-const MAINNET_CONTRACT_ADDRESS = "0x67a27274b63fa3b070cabf7adf59e7b1c1e5b768b18f84b50f6cb85f59c42e5";
-
-// Define supported tokens for different networks
-const MAINNET_SUPPORTED_TOKENS: { [key: string]: TokenOption } = {
-  USDC: {
-    symbol: "USDC",
-    address:
-      "0x053c91253bc9682c04929ca02ed00b3e423f6710d2ee7e0d5ebb06f3ecf368a8",
-    decimals: 6,
-  },
-  ETH: {
-    symbol: "ETH",
-    address:
-      "0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7",
-    decimals: 18,
-  },
-  STRK: {
-    symbol: "STRK",
-    address:
-      "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
-    decimals: 18,
-  },
-};
-
-const TESTNET_SUPPORTED_TOKENS: { [key: string]: TokenOption } = {
-  USDC: {
-    symbol: "USDC",
-    address:
-      "0x05be0e73ef0f477eb8d4fbea87802acbf55c266c2bab64aa93b2db573be15c41",
-    decimals: 6,
-  },
-  ETH: {
-    symbol: "ETH",
-    address:
-      "0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7",
-    decimals: 18,
-  },
-  STRK: {
-    symbol: "STRK",
-    address:
-      "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
-    decimals: 18,
-  },
-};
+import { DistributionData } from "@/lib/types/distribution";
+import { TokenOption } from "@/lib/types/token";
+import { MAINNET_CONTRACT_ADDRESS, TESTNET_CONTRACT_ADDRESS, MAINNET_SUPPORTED_TOKENS, TESTNET_SUPPORTED_TOKENS } from "@/lib/constants/tokens";
+import { useDistribution } from "@/lib/hooks/useDistribution";
+import { DistributionList } from '@/components/ui/distribute/DistributionList';
 
 // Add proper type for CSV parsing result
 type CSVRow = [string, string];
@@ -81,26 +28,37 @@ export default function DistributePage() {
   const { isMounted, hasPrevWallet } = useIsMounted();
   const { address, status, account } = useAccount();
   const { isCartridgeConnected } = useCartridge();
-  const [distributions, setDistributions] = useState<Distribution[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [distributionType, setDistributionType] = useState<
-    "equal" | "weighted"
-  >("equal");
-  const [equalAmount, setEqualAmount] = useState<string>("");
-  const [lumpSum, setLumpSum] = useState<string>("");
-  const [selectedToken, setSelectedToken] = useState<TokenOption | null>(null);
+  const { chain } = useNetwork();
+  
+  const {
+    distributions,
+    distributionType,
+    equalAmount,
+    lumpSum,
+    selectedToken,
+    amountInputType,
+    isLoading,
+    totalRecipients,
+    totalAmount,
+    setDistributionType,
+    setEqualAmount,
+    setLumpSum,
+    setSelectedToken,
+    setAmountInputType,
+    setIsLoading,
+    updateDistribution,
+    removeDistribution,
+    addDistribution,
+    clearDistributions
+  } = useDistribution();
+
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [pendingDistribution, setPendingDistribution] = useState<{
     totalAmount: string;
     recipientCount: number;
   } | null>(null);
-
   const [protocolFeePercentage, setProtocolFeePercentage] = useState<number>(0);
   const [isMainnet, setIsMainnet] = useState<boolean>(true);
-  const { chain } = useNetwork();
-
-  // Add new state for amount input type
-  const [amountInputType, setAmountInputType] = useState<"perAddress" | "lumpSum">("perAddress");
 
   // Derive current contract address and supported tokens based on network
   const CONTRACT_ADDRESS = isMainnet ? MAINNET_CONTRACT_ADDRESS : TESTNET_CONTRACT_ADDRESS;
@@ -111,7 +69,7 @@ export default function DistributePage() {
     if (SUPPORTED_TOKENS && !selectedToken) {
       setSelectedToken(SUPPORTED_TOKENS.STRK);
     }
-  }, [SUPPORTED_TOKENS, selectedToken]);
+  }, [SUPPORTED_TOKENS, selectedToken, setSelectedToken]);
 
   // Add new useEffect for chain checking
   useEffect(() => {
@@ -178,12 +136,13 @@ export default function DistributePage() {
               address: row[0],
               amount: row[1] || equalAmount,
             }));
-          setDistributions(parsedDistributions);
+          clearDistributions();
+          parsedDistributions.forEach(dist => addDistribution(dist.address, dist.amount));
         },
         header: false,
       });
     },
-    [equalAmount]
+    [equalAmount, addDistribution, clearDistributions]
   );
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -194,26 +153,25 @@ export default function DistributePage() {
     maxFiles: 1,
   });
 
-  const addNewRow = () => {
-    setDistributions([...distributions, { address: "", amount: "" }]);
-  };
+  // Memoize the contract address and supported tokens
+  const contractConfig = useMemo(() => ({
+    address: isMainnet ? MAINNET_CONTRACT_ADDRESS : TESTNET_CONTRACT_ADDRESS,
+    tokens: isMainnet ? MAINNET_SUPPORTED_TOKENS : TESTNET_SUPPORTED_TOKENS,
+  }), [isMainnet]);
 
-  const updateDistribution = (
-    index: number,
-    field: keyof Distribution,
-    value: string
-  ) => {
-    const newDistributions = [...distributions];
-    newDistributions[index] = {
-      ...newDistributions[index],
-      [field]: value,
-    };
-    setDistributions(newDistributions);
-  };
+  // Memoize the protocol fee calculation
+  const protocolFee = useMemo(() => {
+    if (!selectedToken || !totalAmount) return "0";
+    const baseAmount = parseFloat(totalAmount);
+    const fee = (baseAmount * protocolFeePercentage) / 10000;
+    return fee.toString();
+  }, [totalAmount, protocolFeePercentage, selectedToken]);
 
-  const removeRow = (index: number) => {
-    setDistributions(distributions.filter((_, i) => i !== index));
-  };
+  // Memoize the total amount with fee
+  const totalAmountWithFee = useMemo(() => {
+    if (!totalAmount || !protocolFee) return "0";
+    return (parseFloat(totalAmount) + parseFloat(protocolFee)).toString();
+  }, [totalAmount, protocolFee]);
 
   const handleDistribute = async (): Promise<void> => {
     if (status !== "connected" || !address || !account) {
@@ -487,7 +445,7 @@ export default function DistributePage() {
           `Successfully distributed tokens to ${recipients.length} addresses`,
           { duration: 10000 }
         );
-        setDistributions([]); // Clear the form on success
+        clearDistributions();
       } else {
         toast.error("Distribution failed");
       }
@@ -648,12 +606,7 @@ export default function DistributePage() {
                         }
                         const perAddressAmount = (Number(lumpSum) / distributions.length).toFixed(2);
                         setEqualAmount(perAddressAmount);
-                        setDistributions(prev =>
-                          prev.map(dist => ({
-                            ...dist,
-                            amount: perAddressAmount
-                          }))
-                        );
+                        addDistribution("", perAddressAmount);
                         toast.success(`Calculated ${perAddressAmount} per address for ${distributions.length} addresses`);
                       }}
                       className="px-6 py-2 bg-gradient-to-r from-[#440495] to-[#B102CD] hover:from-[#B102CD] hover:to-[#440495] text-white font-bold rounded-lg transition-all"
@@ -671,12 +624,7 @@ export default function DistributePage() {
                     value={equalAmount}
                     onChange={(e) => {
                       setEqualAmount(e.target.value);
-                      setDistributions((prev) =>
-                        prev.map((dist) => ({
-                          ...dist,
-                          amount: e.target.value,
-                        }))
-                      );
+                      addDistribution("", e.target.value);
                     }}
                     className="w-full bg-starknet-purple bg-opacity-50 rounded-lg px-4 py-2 text-black placeholder-gray-400"
                   />
@@ -712,46 +660,19 @@ export default function DistributePage() {
         {/* Manual Input Section */}
         <div className="mb-8">
           <div className="flex justify-between mb-4">
-            <h2 className="text-xl font-semibold">Manual Input</h2>
+            <h2 className="text-xl font-semibold text-white">Manual Input</h2>
             <button
-              onClick={addNewRow}
+              onClick={() => addDistribution("", "")}
               className="px-6 py-3 bg-gradient-to-r from-[#440495] to-[#B102CD] hover:from-[#B102CD] hover:to-[#440495] text-white font-bold rounded-full transition-all"
             >
               Add Row
             </button>
           </div>
-
-          {/* Distribution List */}
-          <div className="space-y-4">
-            {distributions.map((dist, index) => (
-              <div key={index} className="flex gap-4">
-                <input
-                  type="text"
-                  placeholder="Address"
-                  value={dist.address}
-                  onChange={(e) =>
-                    updateDistribution(index, "address", e.target.value)
-                  }
-                  className="flex-1 bg-starknet-purple bg-opacity-50 rounded-lg px-4 py-2 text-black placeholder-gray-400"
-                />
-                <input
-                  type="text"
-                  placeholder="Amount"
-                  value={dist.amount}
-                  onChange={(e) =>
-                    updateDistribution(index, "amount", e.target.value)
-                  }
-                  className="w-32 bg-starknet-purple bg-opacity-50 rounded-lg px-4 py-2 text-black placeholder-gray-400"
-                />
-                <button
-                  onClick={() => removeRow(index)}
-                  className="px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-bold rounded-full transition-all"
-                >
-                  Remove
-                </button>
-              </div>
-            ))}
-          </div>
+          <DistributionList
+            distributions={distributions}
+            onUpdate={updateDistribution}
+            onRemove={removeDistribution}
+          />
         </div>
 
         {/* Distribution Button */}

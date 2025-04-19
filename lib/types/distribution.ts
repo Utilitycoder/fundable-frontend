@@ -28,3 +28,8 @@ export interface RecipientData {
       distributions: Distribution[];
       total: number;
   }
+
+  export interface DistributionData {
+    address: string;
+    amount: string;
+  }
